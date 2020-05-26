@@ -20,7 +20,7 @@ bldg_arr= bldg.to_numpy()
 original_bldg= pd.read_excel (r'bldg_removed no wall.xlsx')
 
 #read original wall spreadsheet
-original_wall= pd.read_excel (r'wall.xlsx')
+original_wall= pd.read_excel (r'wall revised.xlsx')
 
 #record 5 eigenvalues for each building
 num_eigen= 5
@@ -51,16 +51,16 @@ for bldg_num in range(bldg.shape[0]):
    
     conc_mat[1] = 1         #material ID 
     conc_mat[3] = 0.17      #Poisson's ratio
-    conc_mat[4] = 2300      #mass density
+    conc_mat[4] = 2400      #mass density
     #elastic modulus
     original_bldg_row= original_bldg.loc[original_bldg['BuildingID'] == bldg_id]
-    # Note: applied a factor of 1.3 to compressive strength, assumed 2300kg/m^3 density
+
     if pd.isnull(original_bldg_row.iat[0,47]):
-        #conc_mat[2] = 4.5*10**9*math.sqrt(4000*0.00689476)
-        conc_mat[2] = (3300*(1.3*4000*0.00689476)**0.5+6900)*(conc_mat[4]/2300)**1.5*10**6     #take comp strength as 4000 is no data available
+        conc_mat[2] = 4.5*10**9*math.sqrt(4000*0.00689476)
+        #conc_mat[2] = (3300*(4000*0.00689476)**0.5+6900)*(conc_mat[4]/2300)**1.5*10**6     #take comp strength as 4000 is no data available
     else:
-        #conc_mat[2] = 4.5*10**9*math.sqrt(original_bldg_row.iat[0,47]*0.00689476)
-        conc_mat[2] = (3300*(1.3*original_bldg_row.iat[0,47]*0.00689476)**0.5+6900)*(conc_mat[4]/2300)**1.5*10**6
+        conc_mat[2] = 4.5*10**9*math.sqrt(original_bldg_row.iat[0,47]*0.00689476)
+        #conc_mat[2] = (3300*(original_bldg_row.iat[0,47]*0.00689476)**0.5+6900)*(conc_mat[4]/2300)**1.5*10**6
         
     # =============================================================================
     #     Define Node
@@ -172,6 +172,89 @@ for bldg_num in range(bldg.shape[0]):
         ops.fix(mass_constraint_data[i,0], 0,0,1,1,1,0)
     
     # =============================================================================
+    #     Apply Wall Constraints
+    # =============================================================================
+    
+    original_wall_data= original_wall.loc[original_wall['BuildingID'] == bldg_id]
+    typical_floor= max(original_wall_data['WallFloor'])
+    original_wall_data= original_wall_data.loc[original_wall_data['WallFloor'] == typical_floor]
+    
+    attached= np.zeros((original_wall_data.shape[0],2))
+    coupled= np.zeros((original_wall_data.shape[0],2))
+    
+    attached_row= 0
+    coupled_row= 0
+
+    for i in range(original_wall_data.shape[0]):
+        if np.isnan(original_wall_data.iat[i,9])!= 1:
+            attached[attached_row,0]= original_wall_data.iat[i,2]
+            attached[attached_row,1]= original_wall_data.iat[i,9]
+            attached_row= attached_row+ 1
+        if np.isnan(original_wall_data.iat[i,10])!= 1: 
+            coupled[coupled_row,0]= original_wall_data.iat[i,2]
+            coupled[coupled_row,1]= original_wall_data.iat[i,10]
+            coupled_row= coupled_row+ 1
+    attached= np.delete(attached,np.where(~attached.any(axis=1))[0], axis=0)
+    coupled= np.delete(coupled,np.where(~coupled.any(axis=1))[0], axis=0)
+    
+    #assume coupled walls are attached
+    combined= np.concatenate((attached, coupled))
+    
+    wall_constraint_organizer= np.zeros((attached.shape[0]+coupled.shape[0],original_wall_data.shape[0]+10))
+            
+    for combined_row in range(combined.shape[0]):
+        if combined[combined_row,1] in wall_constraint_organizer[:,:]:
+            row = np.where(wall_constraint_organizer == combined[combined_row,1])[0][0]
+            column= np.where(wall_constraint_organizer[row,:] == 0)[0][0]
+            wall_constraint_organizer[row,column]= combined[combined_row,0]
+        else:
+            row = np.where(wall_constraint_organizer[:,0] == 0)[0][0]
+            wall_constraint_organizer[row,0:2]= combined[combined_row,:]
+    
+    wall_constraint_organizer= np.delete(wall_constraint_organizer,np.where(~wall_constraint_organizer.any(axis=1))[0], axis=0)
+    
+    wall_constraint_organizer[wall_constraint_organizer==0] = np.nan
+            
+    for current_row in range(wall_constraint_organizer.shape[0]):
+        if wall_constraint_organizer[current_row,0]!='nan':
+            for row in range(wall_constraint_organizer.shape[0]):
+                if wall_constraint_organizer[row,0]!='nan':
+                    if set(wall_constraint_organizer[current_row,:]).isdisjoint(set(wall_constraint_organizer[row,:])):
+                        pass
+                    else:
+                        temp= np.union1d(wall_constraint_organizer[current_row,:], wall_constraint_organizer[row,:])
+                        temp= temp[~np.isnan(temp)]
+                        wall_constraint_organizer[current_row,0:temp.shape[0]]= temp
+                        if row!=current_row:
+                            wall_constraint_organizer[row,:]= 'nan'
+                            
+    wall_constraint_organizer[np.isnan(wall_constraint_organizer)] = 0    
+    
+    original_wall_data_arr= original_wall_data.to_numpy()
+    
+    wall_constraint_data= wall_constraint_organizer
+    
+    for row in range(wall_constraint_organizer.shape[0]):
+        if wall_constraint_organizer[row,0]!= 0:
+            end_column= np.where(wall_constraint_organizer[row,:] == 0)[0][0]
+            for column in range(end_column):
+                wall_constraint_data[row,column]= np.where(original_wall_data_arr[:,2] == wall_constraint_organizer[row,column])[0][0]+1
+
+    
+    check= np.zeros((1000,2))
+    check_row= 0
+    
+    for row in range(wall_constraint_data.shape[0]):
+        if wall_constraint_data[row,0]!= 0:
+            end_column= np.where(wall_constraint_data[row,:] == 0)[0][0]
+            for column in range(1,end_column):
+                for floor in range(num_story):
+                    ops.equalDOF(int(wall_constraint_data[row,0]+1000*(floor+2)), int(wall_constraint_data[row,column]+1000*(floor+2)),3,4,5)
+                    check[check_row,0]= wall_constraint_data[row,0]+1000*(floor+2)
+                    check[check_row,1]= wall_constraint_data[row,column]+1000*(floor+2)
+                    check_row= check_row+1
+                        
+    # =============================================================================
     #     Define Coordinate Transformation
     # =============================================================================
     ops.geomTransf('Linear', 1, 1, 0, 0)
@@ -205,8 +288,8 @@ for bldg_num in range(bldg.shape[0]):
         element_data[row:row+ wall.shape[0],4]= conc_mat[2]                                             #elastic modulus
         element_data[row:row+ wall.shape[0],5]= element_data[row:row+ wall.shape[0],4]/(2*(1+0.17))     #shear modulus
         element_data[row:row+ wall.shape[0],6]= moment_of_inertia[:,0]                                  #J
-        element_data[row:row+ wall.shape[0],7]= moment_of_inertia[:,1]*0.7                              #70% of Iz
-        element_data[row:row+ wall.shape[0],8]= moment_of_inertia[:,2]*0.7                              #70% of Iy
+        element_data[row:row+ wall.shape[0],7]= moment_of_inertia[:,1]*0.7                              #70% of Iy
+        element_data[row:row+ wall.shape[0],8]= moment_of_inertia[:,2]*0.7                              #70% of Iz
         element_data[row:row+ wall.shape[0],9]= 1                                                       #coordinate transfer flag
         element_data[row:row+ wall.shape[0],10]= conc_mat[4]*element_data[row:row+ wall.shape[0],3]     #mass/length
     
@@ -233,7 +316,8 @@ for bldg_num in range(bldg.shape[0]):
 #    
 #    #define nodal loads
 #    wall_data= original_wall.loc[original_wall['BuildingID'] == bldg_id]
-#    wall_data= wall_data.loc[wall_data['WallFloor'] > 1]
+#   #note: need to modify line below to ensure the largest floor is taken    
+#   wall_data= wall_data.loc[wall_data['WallFloor'] > 1]
 #    wall_data_arr = wall_data.to_numpy()
 #    
 #    gravity_load_data= np.zeros((element_data.shape[0],7))
